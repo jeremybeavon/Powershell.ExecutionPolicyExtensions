@@ -1,7 +1,21 @@
+$authenticodeCertificate = $null
 $ampersandOperator = [System.Management.Automation.Language.TokenKind]::Ampersand
 $dotOperator = [System.Management.Automation.Language.TokenKind]::Dot
 
-function Import-UnsignedModule
+function Set-AuthenticodeCertificate
+{
+	[CmdletBinding()]
+	param (
+		[Parameter(Mandatory = $true)]
+		[ValidateNotNull]
+		[System.Security.Cryptography.X509Certificates.X509Certificate2]
+		$Certificate
+	)
+	
+	$script:authenticodeCertificate = $Certificate
+}
+
+function Import-SignedModule
 {
 	[CmdletBinding()]
 	param(
@@ -238,11 +252,13 @@ function Import-UnsignedModule
 				$signedModulePath = [System.IO.Path]::ChangeExtension($moduleFile, "signed$moduleExtension")
 				if ($moduleExtension -eq ".psm1")
 				{
-					New-Module -Name $moduleName -ScriptBlock (Get-UnsignedContent $moduleFile)
+					$signedModulePath = Set-SignedContent $moduleFile
+					$newModuleNames += $signedModulePath
 				}
 				elseif ($moduleExtension -eq ".psd1")
 				{
-					Import-UnsignedPsd1File $moduleFile
+					$signedModulePath = Set-SignedPsd1Content $moduleFile
+					$newModuleNames += $signedModulePath
 				}
 				else
 				{
@@ -260,39 +276,7 @@ function Import-UnsignedModule
 	Import-Module @parameters
 }
 
-function Import-UnsignedPsd1File
-{
-	[CmdletBinding()]
-	param (
-		[Parameter(Mandatory = $true)]
-		[string]
-		$Path
-	)
-	
-	$directory = Split-Path $Path -Parent
-	$fileName = Split-Path $Path -Leaf
-	$psd1Data = Import-LocalizedData -BaseDirectory $directory -FileName $fileName
-	$rootModule = $psd1Data.RootModule
-	if ($psd1Data.ModuleToProcess)
-	{
-		$rootModule = $psd1Data.ModuleToProcess
-	}
-	if ($rootModule)
-	{
-		$rootModulePath = Join-Path $directory $rootModule
-		Import-UnsignedModule -Name $rootModulePath
-	}
-	
-	if ($psd1Data.ScriptsToProcess)
-	{
-		foreach ($scriptToProcess in $psd1Data.ScriptsToProcess)
-		{
-			& (Get-UnsignedContent $scriptToProcess)
-		}
-	}
-}
-
-function Invoke-UnsignedExpression
+function Invoke-SignedExpression
 {
 	[CmdletBinding()]
 	param (
@@ -301,26 +285,11 @@ function Invoke-UnsignedExpression
 		$Command
 	)
 	
-	$Command = ConvertTo-UnsignedContent $Command
+	$Command = ConvertTo-JustInTimeSignedContent $Command
 	Invoke-Expression $Command
 }
 
-function Get-UnsignedScript
-{
-	[CmdletBinding()]
-	param (
-		[Parameter(Mandatory = $true)]
-		[string]
-		$Path
-	)
-	
-	$script = Get-Content $Path -Raw
-	$unsignedConvert = ConvertTo-UnsignedContent $script
-	$scriptBlock = [ScriptBlock]::Create($unsignedConvert)
-	return $scriptBlock
-}
-
-function ConvertTo-UnsignedContent
+function ConvertTo-JustInTimeSignedContent
 {
 	[CmdletBinding()]
 	param (
@@ -343,21 +312,21 @@ function ConvertTo-UnsignedContent
 			$count = $endIndex - $startIndex
 			if ($commandName -eq "Import-Module")
 			{
-				$contentBuilder.Replace("Import-Module", "Import-UnsignedModule", $startIndex, $count)
+				$contentBuilder.Replace("Import-Module", "Import-SignedModule", $startIndex, $count)
 			}
 			elseif ($commandName -eq "Invoke-Expression")
 			{
-				$contentBuilder.Replace("Import-Expression", "Import-UnsignedExpression", $startIndex, $count)
+				$contentBuilder.Replace("Import-Expression", "Import-SignedExpression", $startIndex, $count)
 			}
 			elseif ($commandElement.InvocationOperator -in $ampersandOperator, $dotOperator)
 			{
-				$contentBuilder.Insert($startIndex, "(Get-UnsignedPs1Content ")
+				$contentBuilder.Insert($startIndex, "(Set-SignedPs1Content ")
 				$contentBuilder.Insert($endIndex + 1, ")")
 			}
 			elseif ($commandName -match '\.ps1$')
 			{
-				$contentBuilder.Insert($startIndex, "& (Get-UnsignedPs1Content ")
-				$contentBuilder.Insert($endIndex + 1, ")")
+				$signedPs1File = Set-SignedContent $commandName
+				$contentBuilder.Replace($commandElement.Extent.Text, $signedPs1File, $startIndex, $count)
 			}
 		}
 		
@@ -367,7 +336,7 @@ function ConvertTo-UnsignedContent
 	return $Content
 }
 
-function Get-UnsignedPs1Content
+function Set-SignedPs1Content
 {
 	[CmdletBinding()]
 	param (
@@ -378,19 +347,90 @@ function Get-UnsignedPs1Content
 	
 	if ($Path -match '\.ps1$')
 	{
-		return (Get-UnsignedScript $Path)
+		$Path = Set-SignedContent $Path
 	}
 	
 	return $Path
 }
 
-function Invoke-UnsignedPs1File
+function Set-SignedPsd1Content
 {
-	$result = Invoke-Command -ScriptBlock (Get-UnsignedScript $args[0]) -ArgumentList ($args | Select-Object -Skip 1)
-	return $result
+	[CmdletBinding()]
+	param (
+		[Parameter(Mandatory = $true)]
+		[string]
+		$Path
+	)
+	
+	$directory = Split-Path $Path -Parent
+	$fileName = Split-Path $Path -Leaf
+	$psd1Data = Import-LocalizedData -BaseDirectory $directory -FileName $fileName
+	if ($psd1Data.ModuleToProcess)
+	{
+		$psd1Data.Add("RootModule", $psd1.ModuleToProcess)
+		$psd1Data.Remove("ModuleToProcess")
+	}
+	if ($psd1Data.RootModule)
+	{
+		$signedModuleFile = Set-SignedContent $psd1Data.RootModule
+		$psd1Data.RootModule = $signedModuleFile
+	}
+	if ($psd1Data.ScriptsToProcess)
+	{
+		for ($index = 0; $index -lt $psd1Data.ScriptsToProcess.Length; $index++)
+		{
+			$currentScript = $psd1Data.ScriptsToProcess[$index]
+			$signedScript = Set-SignedContent $currentScript
+			$psd1Data.ScriptsToProcess[$index] = $signedScript
+		}
+	}
+	
+	$extension = [System.IO.Path]::GetExtension($Path)
+	$signedPath = [System.IO.Path]::ChangeExtension($Path, "signed$moduleExtension"
+	$psd1Data.Add("Path", $signedPath)
+	New-ModuleManifest @psd1Data
+	return $signedPath
 }
 
-Export-ModuleMember Import-UnsignedModule
-Export-ModuleMember Invoke-UnsignedExpression
-Export-ModuleMember Get-UnsignedPs1Content
-Export-ModuleMember Invoke-UnsignedPs1File
+function Set-SignedContent
+{
+	[CmdletBinding()]
+	param (
+		[Parameter(Mandatory = $true)]
+		[string]
+		$Path,
+		
+		[Parameter(Mandatory = $false)]
+		[System.Security.Cryptography.X509Certificates.X509Certificate2]
+		$Certificate
+	)
+	
+	$content = Get-Content $Path -Raw
+	$content = ConvertTo-JustInTimeSignedContent $content
+	$extension = [System.IO.Path]::GetExtension($moduleFile)
+	$signedPath = [System.IO.Path]::ChangeExtension($moduleFile, "signed$moduleExtension"
+	Set-Content $signedPath $content
+	if ($Certificate)
+	{
+		$script:authenticodeCertificate = $Certificate
+	}
+	elseif (!$script:authenticodeCertificate)
+	{
+		throw "Authenticode certificate not found."
+	}
+	
+	Set-AuthenticodeSignature -Certificate $script:authenticodeCertificate -FilePath $Path
+	return $signedPath
+}
+
+function Invoke-SignedPs1File
+{
+	$signedPs1File = Set-SignedPs1Content $args[0]
+	Invoke-Expression "'$signedPs1File' $($args | Select-Object -Skip 1)"
+}
+
+Export-ModuleMember Set-AuthenticodeCertificate
+Export-ModuleMember Import-SignedModule
+Export-ModuleMember Invoke-SignedExpression
+Export-ModuleMember Set-SignedPs1Content
+Export-ModuleMember Invoke-SignedPs1File
