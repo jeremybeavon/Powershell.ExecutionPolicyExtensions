@@ -360,15 +360,15 @@ function ConvertTo-UnsignedContent
 			{
 				$contentBuilder.Replace("Import-Expression", "Import-UnsignedExpression", $startIndex, $count) | Out-Null
 			}
-			elseif ($commandElement.InvocationOperator -in $ampersandOperator, $dotOperator)
+			elseif ($command.InvocationOperator -in $ampersandOperator, $dotOperator)
 			{
+                $contentBuilder.Insert($endIndex, ")") | Out-Null
 				$contentBuilder.Insert($startIndex, "(Get-UnsignedPs1Content ") | Out-Null
-				$contentBuilder.Insert($endIndex + 1, ")") | Out-Null
 			}
 			elseif ($commandName -match '\.ps1$')
 			{
+                $contentBuilder.Insert($endIndex, ")") | Out-Null
 				$contentBuilder.Insert($startIndex, "& (Get-UnsignedPs1Content ") | Out-Null
-				$contentBuilder.Insert($endIndex + 1, ")") | Out-Null
 			}
 		}
         if ($Path)
