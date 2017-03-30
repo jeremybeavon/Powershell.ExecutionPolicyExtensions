@@ -208,9 +208,11 @@ function Import-UnsignedModule
 	{
 		$parameters.Add("Variable", $Variable)
 	}
-	
+
+	$useName = $false
 	if (!$Assembly -and !$CimSession -and !$FullyQualifiedName -and !$ModuleInfo -and !$PSSession)
 	{
+        $useName = $true
 		$newModuleNames = @()
 		foreach ($moduleName in $Name)
 		{
@@ -232,13 +234,13 @@ function Import-UnsignedModule
 				}
 			}
 			
-			if (Test-Path $moduleFile)
+			if ($moduleFile -and (Test-Path $moduleFile))
 			{
 				$moduleExtension = [System.IO.Path]::GetExtension($moduleFile)
 				$signedModulePath = [System.IO.Path]::ChangeExtension($moduleFile, "signed$moduleExtension")
 				if ($moduleExtension -eq ".psm1")
 				{
-					New-Module -Name $moduleName -ScriptBlock (Get-UnsignedScript $moduleFile)
+					New-Module -Name $moduleName -ScriptBlock (Get-UnsignedScript $moduleFile) | Out-Null
 				}
 				elseif ($moduleExtension -eq ".psd1")
 				{
@@ -257,7 +259,10 @@ function Import-UnsignedModule
 		
 		$parameters.Name = $newModuleNames
 	}
-	Import-Module @parameters
+    if (!$useName -or $parameters.Name)
+    {
+	    Import-Module @parameters
+    }
 }
 
 function Import-UnsignedPsd1File
@@ -315,7 +320,7 @@ function Get-UnsignedScript
 	)
 	
 	$script = (cmd /c type $Path) -join "`r`n"
-	$unsignedConvert = ConvertTo-UnsignedContent $script
+	$unsignedConvert = ConvertTo-UnsignedContent $script $Path
 	$scriptBlock = [ScriptBlock]::Create($unsignedConvert)
 	return $scriptBlock
 }
@@ -326,7 +331,11 @@ function ConvertTo-UnsignedContent
 	param (
 		[Parameter(Mandatory = $true)]
 		[string]
-		$Content
+		$Content,
+
+        [Parameter(Mandatory = $false)]
+        [string]
+        $Path
 	)
 	
 	$errors = @()
@@ -334,8 +343,10 @@ function ConvertTo-UnsignedContent
 	if ($errors.Length -eq 0)
 	{
 		$contentBuilder = New-Object System.Text.StringBuilder($Content)
-		foreach ($command in $parsedContent.FindAll({param ($ast) $ast -is [System.Management.Automation.Language.CommandAst]}, $true))
+        $commands = $parsedContent.FindAll({param ($ast) $ast -is [System.Management.Automation.Language.CommandAst]}, $true).ToArray()
+		for ($index = $commands.Length - 1; $index -ge 0; $index--)
 		{
+            $command = $commands[$index]
 			$commandElement = $command.CommandElements[0]
 			$commandName = $commandElement.Value
 			$startIndex = $commandElement.Extent.StartOffset
@@ -343,24 +354,33 @@ function ConvertTo-UnsignedContent
 			$count = $endIndex - $startIndex
 			if ($commandName -eq "Import-Module")
 			{
-				$contentBuilder.Replace("Import-Module", "Import-UnsignedModule", $startIndex, $count)
+				$contentBuilder.Replace("Import-Module", "Import-UnsignedModule", $startIndex, $count) | Out-Null
 			}
 			elseif ($commandName -eq "Invoke-Expression")
 			{
-				$contentBuilder.Replace("Import-Expression", "Import-UnsignedExpression", $startIndex, $count)
+				$contentBuilder.Replace("Import-Expression", "Import-UnsignedExpression", $startIndex, $count) | Out-Null
 			}
 			elseif ($commandElement.InvocationOperator -in $ampersandOperator, $dotOperator)
 			{
-				$contentBuilder.Insert($startIndex, "(Get-UnsignedPs1Content ")
-				$contentBuilder.Insert($endIndex + 1, ")")
+				$contentBuilder.Insert($startIndex, "(Get-UnsignedPs1Content ") | Out-Null
+				$contentBuilder.Insert($endIndex + 1, ")") | Out-Null
 			}
 			elseif ($commandName -match '\.ps1$')
 			{
-				$contentBuilder.Insert($startIndex, "& (Get-UnsignedPs1Content ")
-				$contentBuilder.Insert($endIndex + 1, ")")
+				$contentBuilder.Insert($startIndex, "& (Get-UnsignedPs1Content ") | Out-Null
+				$contentBuilder.Insert($endIndex + 1, ")") | Out-Null
 			}
 		}
-		
+        if ($Path)
+        {
+            $psScriptRootInsertOffset = 0
+            if ($parsedContent.ParamBlock)
+            {
+                $psScriptRootInsertOffset = $parsedContent.ParamBlock.Extent.EndOffset + 1
+            }
+            $contentBuilder.Insert($psScriptRootInsertOffset, "`r`n`$PSScriptRoot = '$(Split-Path -Parent (Resolve-Path $Path))'`r`n") | Out-Null
+		}
+
 		$Content = $contentBuilder.ToString()
 	}
 	
@@ -386,7 +406,10 @@ function Get-UnsignedPs1Content
 
 function Invoke-UnsignedPs1File
 {
-	$result = Invoke-Command -ScriptBlock (Get-UnsignedScript $args[0]) -ArgumentList ($args | Select-Object -Skip 1)
+    $unsignedScript = Get-UnsignedScript $args[0]
+    $arguments = ($args | Select-Object @{Name = "arg";Expression={if ($_ -contains ' '){"'$_'"}else{$_}}} -Skip 1 | Select-Object -ExpandProperty arg) -join ' '
+    $scriptToRun = "& `$unsignedScript $arguments"
+    $result = Invoke-Expression $scriptToRun
 	return $result
 }
 
