@@ -240,7 +240,7 @@ function Import-UnsignedModule
 				$signedModulePath = [System.IO.Path]::ChangeExtension($moduleFile, "signed$moduleExtension")
 				if ($moduleExtension -eq ".psm1")
 				{
-					New-Module -Name $moduleName -ScriptBlock (Get-UnsignedScript $moduleFile) | Out-Null
+					New-Module -Name $moduleName -ScriptBlock (Get-UnsignedScript $moduleFile) | Write-Verbose
 				}
 				elseif ($moduleExtension -eq ".psd1")
 				{
@@ -406,10 +406,19 @@ function Get-UnsignedPs1Content
 
 function Invoke-UnsignedPs1File
 {
-    $unsignedScript = Get-UnsignedScript $args[0]
+    $unsignedScriptFile = $args[0]
+    $unsignedScript = Get-UnsignedScript $unsignedScriptFile
     $arguments = ($args | Select-Object @{Name = "arg";Expression={if ($_ -contains ' '){"'$_'"}else{$_}}} -Skip 1 | Select-Object -ExpandProperty arg) -join ' '
-    $scriptToRun = "& `$unsignedScript $arguments"
-    $result = Invoke-Expression $scriptToRun
+    try
+    {
+    	$scriptToRun = "& `$unsignedScript $arguments"
+    	$result = Invoke-Expression $scriptToRun
+    }
+    catch
+    {
+    	Write-Error "Failed to execute script file: $unsignedScriptFile"
+	throw
+    }
 	return $result
 }
 
